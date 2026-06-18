@@ -1,0 +1,394 @@
+import vk_api
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+import json
+import os
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+import re
+from urllib.parse import urljoin
+
+# ========== ТВОИ ДАННЫЕ ==========
+VK_TOKEN = "vk1.a.ZeUsiPCezPKUU38HouOfcR882Em0fnUYBrRTAYH29e_s19TT5C40jDgckVlTB54Di7P_gygRa8BMUh9F2qs6hI6yZGAAPuC_gbrR_-W3fs9UjxGEac759QEPKujlg8Af4pQoNI-6f_VZfJs32IJLnRKSCy-y72C54qxVF0vdz766wpCniYsQcs51ms8bQ0XCxnX1oWCe7nSB_MfaAfnPuQ"
+GROUP_ID = 239314942
+ADMIN_ID = 563818842
+# =================================
+
+PROPOSALS_FILE = "proposals.json"
+user_states = {}
+
+vk_session = vk_api.VkApi(token=VK_TOKEN)
+vk = vk_session.get_api()
+longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+
+def send_message(user_id, message, keyboard=None):
+    """Отправка сообщения"""
+    try:
+        data = {'user_id': user_id, 'message': message, 'random_id': 0}
+        if keyboard:
+            data['keyboard'] = keyboard.get_keyboard()
+        vk.messages.send(**data)
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return False
+
+def get_main_keyboard(is_admin=False):
+    """Главная клавиатура"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button("📅 Афиша", color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button("➕ Предложить событие", color=VkKeyboardColor.POSITIVE)
+    keyboard.add_line()
+    keyboard.add_button("ℹ️ Помощь", color=VkKeyboardColor.SECONDARY)
+    
+    if is_admin:
+        keyboard.add_line()
+        keyboard.add_button("🔄 Парсинг сайта", color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button("📋 Заявки", color=VkKeyboardColor.SECONDARY)
+    
+    return keyboard
+
+def get_event_template():
+    """Шаблон для заполнения события с ПРИМЕРОМ"""
+    template = """📝 *ФОРМА ЗАПОЛНЕНИЯ СОБЫТИЯ*
+
+Пожалуйста, заполни все поля по порядку. Вот пример правильного заполнения:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 *ПРИМЕР:*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1️⃣ *Название:* Рок-концерт группы "Ленинград"
+2️⃣ *Дата и время:* 25 июня 2026, 19:00
+3️⃣ *Место проведения:* ДК Абакан, ул. Ленина, 10
+4️⃣ *Описание:* Выступление легендарной группы. 
+   Прозвучат лучшие хиты. Начало в 19:00.
+5️⃣ *Цена:* 1500 руб
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✏️ *ТЕПЕРЬ НАПИШИ НАЗВАНИЕ ТВОЕГО МЕРОПРИЯТИЯ*
+
+(просто отправь название в следующем сообщении)"""
+    return template
+
+def get_events_from_site():
+    """Парсинг сайта с картинками"""
+    events = []
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get("https://dosug-abakan.ru/", timeout=10, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем ссылки с мероприятиями
+        links = soup.find_all('a', href=True)
+        for link in links:
+            title = link.get_text(strip=True)
+            if 10 < len(title) < 100:
+                parent = link.find_parent()
+                
+                # Ищем картинку
+                image_url = None
+                if parent:
+                    img = parent.find('img')
+                    if img and img.get('src'):
+                        image_url = urljoin('https://dosug-abakan.ru/', img['src'])
+                
+                # Ищем дату
+                datetime_text = "Дата уточняется"
+                if parent:
+                    date_match = re.search(r'\d{1,2}\s+(янв|фев|мар|апр|мая|июн|июл|авг|сен|окт|ноя|дек)', parent.get_text())
+                    if date_match:
+                        datetime_text = date_match.group()
+                
+                # Ищем цену
+                price = "Уточняйте"
+                if parent and 'руб' in parent.get_text():
+                    price_match = re.search(r'(\d+[\s\d]*\s*руб)', parent.get_text())
+                    if price_match:
+                        price = price_match.group()
+                
+                events.append({
+                    'title': title[:100],
+                    'datetime': datetime_text,
+                    'place': 'Абакан',
+                    'description': parent.get_text(strip=True)[:200] if parent else title,
+                    'price': price,
+                    'link': urljoin('https://dosug-abakan.ru/', link['href']),
+                    'image_url': image_url
+                })
+                
+                if len(events) >= 5:
+                    break
+        
+        if not events:
+            # Демо-мероприятия
+            events = [
+                {
+                    'title': '🎨 День города Абакан',
+                    'datetime': '15-16 июня 2026, 10:00-22:00',
+                    'place': 'Центральная площадь',
+                    'description': 'Праздничный концерт, салют, ярмарка, мастер-классы.',
+                    'price': 'Бесплатно',
+                    'link': '',
+                    'image_url': None
+                },
+                {
+                    'title': '🎭 Спектакль "Вишневый сад"',
+                    'datetime': '18 июня 2026, 18:30',
+                    'place': 'Русский драматический театр',
+                    'description': 'Классическая постановка Чехова.',
+                    'price': '400-700 руб',
+                    'link': '',
+                    'image_url': None
+                }
+            ]
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        events = []
+    
+    return events
+
+def send_event_as_message(user_id, event, index=None, total=None):
+    """Отправляет событие отдельным сообщением"""
+    if index and total:
+        header = f"🎯 *Мероприятие {index}/{total}*\n\n"
+    else:
+        header = "🎉 *МЕРОПРИЯТИЕ*\n\n"
+    
+    message = header
+    message += f"*{event['title']}*\n\n"
+    message += f"📅 *Когда:* {event['datetime']}\n"
+    message += f"📍 *Где:* {event['place']}\n"
+    message += f"💰 *Цена:* {event['price']}\n\n"
+    message += f"📖 *Описание:*\n{event['description'][:300]}\n"
+    
+    if event.get('link'):
+        message += f"\n🔗 Подробнее: {event['link']}"
+    
+    try:
+        vk.messages.send(user_id=user_id, message=message, random_id=0)
+        return True
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        return False
+
+def post_to_wall(event):
+    """Публикация на стену"""
+    try:
+        message = f"🎉 *{event['title']}*\n\n"
+        message += f"📅 *Когда:* {event['datetime']}\n"
+        message += f"📍 *Где:* {event['place']}\n"
+        message += f"💰 *Цена:* {event['price']}\n\n"
+        message += f"📖 *Описание:*\n{event['description']}\n"
+        
+        vk.wall.post(owner_id=f"-{GROUP_ID}", message=message, from_group=1)
+        return True
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        return False
+
+def save_proposal(user_id, event_data):
+    """Сохранение предложения"""
+    proposals = []
+    if os.path.exists(PROPOSALS_FILE):
+        with open(PROPOSALS_FILE, 'r', encoding='utf-8') as f:
+            proposals = json.load(f)
+    
+    proposal_id = len(proposals) + 1
+    proposals.append({
+        'id': proposal_id,
+        'user_id': user_id,
+        'data': event_data,
+        'status': 'pending',
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    
+    with open(PROPOSALS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(proposals, f, ensure_ascii=False, indent=2)
+    
+    return proposal_id
+
+print("=" * 50)
+print("🤖 FINAL EVENT BOT ЗАПУЩЕН")
+print("=" * 50)
+print(f"Группа: Бот-планер")
+print("👂 Ожидаю сообщения...")
+print("=" * 50)
+
+# Отправляем приветствие админу
+try:
+    send_message(ADMIN_ID, "✅ Бот запущен! Используй кнопки для управления.", get_main_keyboard(True))
+except:
+    pass
+
+# Основной цикл
+for event in longpoll.listen():
+    try:
+        if event.type == VkBotEventType.MESSAGE_NEW:
+            user_id = event.message.from_id
+            text = event.message.text
+            is_admin = (user_id == ADMIN_ID)
+            
+            print(f"📨 {user_id}: {text[:40]}")
+            
+            # Пошаговое добавление события
+            if user_id in user_states:
+                state = user_states[user_id]
+                step = state['step']
+                
+                if step == 'waiting_title':
+                    state['title'] = text
+                    state['step'] = 'waiting_datetime'
+                    send_message(user_id, "📅 Теперь напиши **ДАТУ и ВРЕМЯ**\n(например: 25 июня 2026, 19:00)", get_main_keyboard(is_admin))
+                
+                elif step == 'waiting_datetime':
+                    state['datetime'] = text
+                    state['step'] = 'waiting_place'
+                    send_message(user_id, "📍 Теперь напиши **МЕСТО ПРОВЕДЕНИЯ**\n(например: ДК Абакан, ул. Ленина, 10)", get_main_keyboard(is_admin))
+                
+                elif step == 'waiting_place':
+                    state['place'] = text
+                    state['step'] = 'waiting_description'
+                    send_message(user_id, "📖 Теперь напиши **ОПИСАНИЕ** мероприятия\n(что будет, программа, особенности)", get_main_keyboard(is_admin))
+                
+                elif step == 'waiting_description':
+                    state['description'] = text
+                    state['step'] = 'waiting_price'
+                    send_message(user_id, "💰 Теперь напиши **ЦЕНУ**\n(например: 500 руб, Бесплатно, Донат)", get_main_keyboard(is_admin))
+                
+                elif step == 'waiting_price':
+                    event_data = {
+                        'title': state.get('title', 'Без названия'),
+                        'datetime': state.get('datetime', 'Дата не указана'),
+                        'place': state.get('place', 'Место не указано'),
+                        'description': state.get('description', 'Описание отсутствует'),
+                        'price': text,
+                        'link': ''
+                    }
+                    
+                    proposal_id = save_proposal(user_id, event_data)
+                    
+                    # Уведомление админу
+                    admin_msg = f"📝 *НОВАЯ ЗАЯВКА #{proposal_id}*\n\n"
+                    admin_msg += f"👤 От: [id{user_id}|Пользователь]\n\n"
+                    admin_msg += f"📌 *Название:* {event_data['title']}\n"
+                    admin_msg += f"📅 *Дата:* {event_data['datetime']}\n"
+                    admin_msg += f"📍 *Место:* {event_data['place']}\n"
+                    admin_msg += f"📖 *Описание:* {event_data['description'][:150]}\n"
+                    admin_msg += f"💰 *Цена:* {event_data['price']}"
+                    
+                    kb = VkKeyboard(inline=True)
+                    kb.add_callback_button(f"✅ Опубликовать #{proposal_id}", color=VkKeyboardColor.POSITIVE, payload={"type": "approve", "id": proposal_id})
+                    kb.add_callback_button(f"❌ Отклонить #{proposal_id}", color=VkKeyboardColor.NEGATIVE, payload={"type": "reject", "id": proposal_id})
+                    
+                    send_message(ADMIN_ID, admin_msg, kb)
+                    send_message(user_id, "✅ Спасибо! Твое предложение отправлено на модерацию администратору.\n\nОжидай публикации в ближайшее время!", get_main_keyboard(is_admin))
+                    
+                    del user_states[user_id]
+                
+                continue
+            
+            # Обработка команд
+            if text == "📅 Афиша" or text.lower() == "афиша":
+                send_message(user_id, "🔍 Загружаю афишу...")
+                events = get_events_from_site()
+                
+                if events:
+                    send_message(user_id, f"📅 Найдено {len(events)} мероприятий:")
+                    for i, event in enumerate(events[:5], 1):
+                        send_event_as_message(user_id, event, i, len(events[:5]))
+                        import time
+                        time.sleep(0.3)
+                    send_message(user_id, "✅ Это все мероприятия на сегодня!", get_main_keyboard(is_admin))
+                else:
+                    send_message(user_id, "❌ Не удалось загрузить афишу. Попробуй позже.", get_main_keyboard(is_admin))
+            
+            elif text == "➕ Предложить событие" or text.lower() == "предложить":
+                send_message(user_id, get_event_template())
+                user_states[user_id] = {'step': 'waiting_title'}
+            
+            elif text == "ℹ️ Помощь" or text.lower() == "помощь":
+                help_text = """📖 *Помощь*
+Это бот для публикации мероприятий. Здесь вы можете:
+🔹 *Афиша* - посмотреть текущие мероприятия
+🔹 *Предложить событие* - добавить свое мероприятие
+
+*Как предложить событие:*
+1. Нажми кнопку "Предложить событие"
+2. Заполни все поля по примеру
+3. Дождись публикации
+
+*Пример заполнения:*
+Название: Рок-концерт
+Дата: 25 июня, 19:00
+Место: ДК Абакан
+Описание: Выступление групп
+Цена: 500 руб
+
+Администратор проверит и опубликует!"""
+                send_message(user_id, help_text, get_main_keyboard(is_admin))
+            
+            # Админские команды
+            elif is_admin:
+                if text == "🔄 Парсинг сайта" or text.lower() == "парсинг":
+                    send_message(user_id, "🔍 Парсинг сайта dosug-abakan.ru...")
+                    events = get_events_from_site()
+                    
+                    if events:
+                        send_message(user_id, f"✅ Найдено {len(events)} мероприятий. Публикую...")
+                        published = 0
+                        for e in events[:3]:
+                            if post_to_wall(e):
+                                published += 1
+                                send_message(user_id, f"✅ Опубликовано: {e['title']}")
+                        send_message(user_id, f"✅ Готово! Опубликовано {published} постов.", get_main_keyboard(is_admin))
+                    else:
+                        send_message(user_id, "❌ Не удалось найти мероприятия.", get_main_keyboard(is_admin))
+                
+                elif text == "📋 Заявки" or text.lower() == "заявки":
+                    if os.path.exists(PROPOSALS_FILE):
+                        with open(PROPOSALS_FILE, 'r', encoding='utf-8') as f:
+                            proposals = json.load(f)
+                        pending = [p for p in proposals if p.get('status') == 'pending']
+                        
+                        if pending:
+                            send_message(user_id, f"📋 *Новые заявки ({len(pending)})*\n\n")
+                            for p in pending[:5]:
+                                msg = f"📝 *#{p['id']}*\n📌 {p['data']['title']}\n📅 {p['data']['datetime']}"
+                                send_message(user_id, msg)
+                        else:
+                            send_message(user_id, "✅ Нет новых заявок", get_main_keyboard(is_admin))
+                    else:
+                        send_message(user_id, "📭 Заявок пока нет", get_main_keyboard(is_admin))
+            
+            else:
+                send_message(user_id, "Выбери действие на кнопках:", get_main_keyboard(is_admin))
+        
+        # Обработка нажатий на кнопки
+        elif event.type == VkBotEventType.MESSAGE_EVENT:
+            user_id = event.object.user_id
+            payload = event.object.payload
+            
+            if payload.get("type") == "approve":
+                proposal_id = payload.get("id")
+                if os.path.exists(PROPOSALS_FILE):
+                    with open(PROPOSALS_FILE, 'r', encoding='utf-8') as f:
+                        proposals = json.load(f)
+                    
+                    for p in proposals:
+                        if p['id'] == proposal_id and p['status'] == 'pending':
+                            if post_to_wall(p['data']):
+                                p['status'] = 'approved'
+                                with open(PROPOSALS_FILE, 'w', encoding='utf-8') as f:
+                                    json.dump(proposals, f, ensure_ascii=False, indent=2)
+                                send_message(user_id, f"✅ Заявка #{proposal_id} опубликована на стене!")
+                                send_message(p['user_id'], "🎉 *Твое мероприятие опубликовано!*\n\nСпасибо за вклад в жизнь сообщества!")
+                            break
+            
+            elif payload.get("type") == "reject":
+                proposal_id = payload.get("id")
+                send_message(user_id, f"❌ Заявка #{proposal_id} отклонена")
+    
+    except Exception as e:
+        print(f"⚠️ Ошибка: {e}")
+        continue
